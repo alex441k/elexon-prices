@@ -128,6 +128,7 @@ main { padding: 22px 24px 40px; max-width: 1480px; margin: 0 auto;
 .panel { background: var(--card); border: 1px solid var(--rule); border-radius: var(--radius); margin-bottom: 18px; }
 .panel-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; padding: 14px 18px 4px; }
 .panel-head h2 { margin: 0; font-size: 14px; font-weight: 500; color: var(--muted); letter-spacing: 0.02em; }
+.head-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
 .budget { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); }
 .budget .box { display: flex; align-items: center; background: var(--bg); border: 1px solid var(--rule-strong); border-radius: 4px; padding: 0 8px; }
 .budget .box:focus-within { border-color: var(--text); }
@@ -304,6 +305,11 @@ td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
   <section class="panel">
     <div class="panel-head">
       <h2 id="chartTitle">System sell price, today</h2>
+      <div class="head-tools">
+      <div class="units gran" role="group" aria-label="Half-hourly or daily" hidden>
+        <button type="button" data-mode="periods" aria-pressed="false">Half-hourly</button>
+        <button type="button" data-mode="daily" aria-pressed="true">Daily average</button>
+      </div>
       <label class="budget" id="budgetBox">Budget
         <span class="box">£<input type="number" id="budget" inputmode="decimal" step="0.01" placeholder="None" aria-label="Budget in pounds per MWh"><span class="unit">/MWh</span></span>
         <button type="button" class="clear" id="clearBudget" hidden>Clear</button>
@@ -311,6 +317,7 @@ td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
       <div class="units" id="unitsBox" role="group" aria-label="Chart units" hidden>
         <button type="button" data-units="share" aria-pressed="true">Share</button>
         <button type="button" data-units="mw" aria-pressed="false">MW</button>
+      </div>
       </div>
     </div>
     <div class="legend" id="legend" hidden></div>
@@ -323,9 +330,9 @@ td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
   <section class="panel">
     <div class="table-head">
       <h2 id="tableTitle">Settlement data</h2>
-      <div class="units" id="tableMode" role="group" aria-label="Table rows" hidden>
-        <button type="button" data-mode="periods" aria-pressed="true">Half-hourly</button>
-        <button type="button" data-mode="daily" aria-pressed="false">Daily average</button>
+      <div class="units gran" id="tableMode" role="group" aria-label="Half-hourly or daily" hidden>
+        <button type="button" data-mode="periods" aria-pressed="false">Half-hourly</button>
+        <button type="button" data-mode="daily" aria-pressed="true">Daily average</button>
       </div>
     </div>
     <div class="table-scroll">
@@ -375,7 +382,7 @@ td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
     wsFailed: false,
     budget: null,
     units: "share",
-    tableMode: "periods",
+    tableMode: "daily", // daily averages by default whenever the range covers more than one day
     highlight: null,
     loadId: 0
   };
@@ -401,6 +408,7 @@ td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
   function ordinal(n) { const s = ["th", "st", "nd", "rd"], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); }
   function parts(ms) { const o = {}; for (const p of partsFmt.formatToParts(new Date(ms))) o[p.type] = p.value; return o; }
   function longDate(ms) { const p = parts(ms); return `${p.weekday} ${ordinal(+p.day)} ${MONTHS[+p.month - 1]} ${p.year}`; }
+  function dayOnly(ms) { const p = parts(ms); return `${p.weekday} ${+p.day}`; }
   function shortDate(ms) { const p = parts(ms); return `${p.weekday} ${ordinal(+p.day)} ${MONTHS[+p.month - 1]}`; }
   function ymdLong(ymd) { const [y, m, d] = ymd.split("-").map(Number); return longDate(Date.UTC(y, m - 1, d, 12)); }
   const hm = (ms) => hmFmt.format(new Date(ms));
@@ -600,7 +608,8 @@ td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
     const heading = mix ? "GB grid mix" : "GB system sell price";
     $("viewTitle").textContent = heading;
     document.title = `${heading} | Estover`;
-    $("chartTitle").textContent = mix ? `Generation by fuel type, ${rangeLabel()}` : `System sell price, ${rangeLabel()}`;
+    const perDay = showDaily(s) ? ", daily average" : "";
+    $("chartTitle").textContent = mix ? `Generation by fuel type, ${rangeLabel()}${perDay}` : `System sell price, ${rangeLabel()}${perDay}`;
     const provCount = mix ? s.filter((d) => d.provisional).length : 0;
     $("tableTitle").textContent = `Settlement data, ${s.length} period${s.length === 1 ? "" : "s"}${provCount ? `. Figures in italics are provisional estimates` : ""}`;
     $("budgetBox").hidden = mix;
@@ -634,10 +643,21 @@ td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
       ? `<div class="delta" style="color:var(--muted)">${ch >= 0 ? "▲" : "▼"} ${Math.abs(ch).toFixed(1)} pts on previous period</div>`
       : `<div class="delta ${ch >= 0 ? "up" : "down"}">${ch >= 0 ? "▲" : "▼"} £${Math.abs(ch).toFixed(2)} on previous period</div>`;
     const mwLine = (d) => (mix ? `<div class="sub">${mw(d.g.gas)} MW${d.provisional ? ", share provisional" : ""}</div>` : "");
+    let minD = sum.min, maxD = sum.max, minLabel = mix ? "Least gas" : "Min", maxLabel = mix ? "Most gas" : "Max";
+    let whenMM = when, mwMM = mwLine;
+    if (showDaily(s)) {
+      // With daily averages on, min and max are the lowest and highest days
+      const ds = summary(dailyRows(s));
+      minD = ds.min; maxD = ds.max;
+      minLabel = mix ? "Least gas day" : "Lowest day"; maxLabel = mix ? "Most gas day" : "Highest day";
+      const today = todayUK();
+      whenMM = (d) => dual(longDate(d.t), shortDate(d.t)) + (d.date === today ? `, to ${hm(d.last.t)}` : "");
+      mwMM = (d) => (mix ? `<div class="sub">${mw(d.g.gas)} MW on average</div>` : `<div class="sub">${d.n} periods</div>`);
+    }
     el.innerHTML = `
       <div class="stat"><div class="label">${mix ? "Average gas share" : "Average"}</div><div class="value">${fmt(sum.avg)}</div>${avgExtra}</div>
-      ${hlCard("min", mix ? "Least gas" : "Min")}<div class="value">${fmt(sum.min.v)}</div><div class="sub">${when(sum.min)}</div>${mwLine(sum.min)}</div>
-      ${hlCard("max", mix ? "Most gas" : "Max")}<div class="value">${fmt(sum.max.v)}</div><div class="sub">${when(sum.max)}</div>${mwLine(sum.max)}</div>
+      ${hlCard("min", minLabel)}<div class="value">${fmt(minD.v)}</div><div class="sub">${whenMM(minD)}</div>${mwMM(minD)}</div>
+      ${hlCard("max", maxLabel)}<div class="value">${fmt(maxD.v)}</div><div class="sub">${whenMM(maxD)}</div>${mwMM(maxD)}</div>
       <div class="stat"><div class="label">${mix ? "Gas now" : "Latest"}</div><div class="value">${fmt(sum.latest.v)}</div><div class="sub">${when(sum.latest)}</div>${mwLine(sum.latest)}${chHtml}</div>`;
   }
 
@@ -685,7 +705,7 @@ td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
       if (state.view === "ssp") {
         let sum = 0, min = g.list[0], max = g.list[0];
         for (const d of g.list) { sum += d.v; if (d.v < min.v) min = d; if (d.v > max.v) max = d; }
-        Object.assign(out, { avg: sum / n, min, max,
+        Object.assign(out, { avg: sum / n, v: sum / n, min, max,
           niv: g.list.reduce((a, d) => a + (d.niv ?? 0), 0),
           above: state.budget === null ? null : g.list.filter((d) => d.v >= state.budget).length });
       } else {
@@ -693,6 +713,7 @@ td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
         for (const grp of GROUPS) out.g[grp.id] = g.list.reduce((a, d) => a + d.g[grp.id], 0) / n;
         out.total = g.list.reduce((a, d) => a + d.total, 0) / n;
         out.share = out.total ? (out.g.gas / out.total) * 100 : 0;
+        out.v = out.share;
         out.provisional = g.list.some((d) => d.provisional);
       }
       return out;
@@ -727,7 +748,7 @@ td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
   }
 
   function renderTable(s) {
-    $("tableMode").hidden = !multiDay(s);
+    document.querySelectorAll(".gran").forEach((g) => { g.hidden = !multiDay(s); });
     if (showDaily(s)) return renderDaily(s);
     const mix = state.view === "mix";
     const cols = mix
@@ -839,7 +860,86 @@ td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
       el("text", { x: W / 2, y: H / 2, "text-anchor": "middle" }, svg).textContent = state.loading ? "Loading" : "Nothing published for this range yet";
       return;
     }
-    if (state.view === "mix") drawMix(svg, s, W, H); else drawPrice(svg, s, W, H);
+    if (showDaily(s)) {
+      const days = dailyRows(s);
+      if (state.view === "mix") drawDailyMix(svg, days, W, H); else drawDailyPrice(svg, days, W, H);
+    } else if (state.view === "mix") drawMix(svg, s, W, H); else drawPrice(svg, s, W, H);
+  }
+
+  // Daily charts: one column per day
+  function bandFrame(svg, days, W, H, lo, hi, step, yLabel) {
+    const m = { l: 54, r: 14, t: 16, b: 28 }, iw = W - m.l - m.r, ih = H - m.t - m.b;
+    const slot = iw / days.length, bw = Math.max(2, Math.min(56, slot * 0.72));
+    const xc = (i) => m.l + slot * (i + 0.5);
+    const y = (v) => m.t + ih - ((v - lo) / (hi - lo)) * ih;
+    const g = el("g", { class: "grid" }, svg);
+    for (let v = lo; v <= hi + step / 2; v += step) {
+      el("line", { x1: m.l, x2: m.l + iw, y1: y(v), y2: y(v) }, g);
+      el("text", { x: m.l - 8, y: y(v) + 4, "text-anchor": "end" }, svg).textContent = yLabel(v);
+    }
+    // Label every day if there's room, otherwise every second, third or seventh
+    const labelW = (days.length > 10 ? 52 : 84);
+    const every = [1, 2, 3, 7, 14].find((k) => (slot * k) >= labelW) || 14;
+    days.forEach((d, i) => {
+      if (i % every) return;
+      const txt = days.length > 10 ? dayOnly(d.t) : shortDate(d.t);
+      el("text", { x: xc(i), y: H - 8, "text-anchor": "middle" }, svg).textContent = txt;
+    });
+    return { m, iw, ih, xc, bw, y, x: null };
+  }
+
+  function drawDailyPrice(svg, days, W, H) {
+    let lo = Math.min(...days.map((d) => d.v)), hi = Math.max(...days.map((d) => d.v));
+    if (state.budget !== null) { lo = Math.min(lo, state.budget); hi = Math.max(hi, state.budget); }
+    const pad = Math.max((hi - lo) * 0.15, 2);
+    lo -= pad; hi += pad;
+    const step = niceStep(hi - lo, H < 250 ? 4 : 5);
+    lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+    const f = bandFrame(svg, days, W, H, lo, hi, step, (v) => (v < 0 ? "-£" : "£") + Math.abs(+v.toFixed(2)));
+    const { xc, bw, y } = f, today = todayUK();
+    const pts = days.map((d, i) => [xc(i), y(d.v)]);
+    if (state.budget !== null) {
+      // Bars grow from the budget line: green for days above it, yellow for days below
+      const by = y(state.budget);
+      days.forEach((d, i) => {
+        const top = y(d.v);
+        el("rect", { x: xc(i) - bw / 2, y: Math.min(top, by), width: bw, height: Math.max(1, Math.abs(by - top)), rx: 2,
+          fill: d.v >= state.budget ? "#7cc242" : "#f5d63d", "fill-opacity": d.date === today ? 0.55 : 0.9 }, svg);
+      });
+      el("line", { x1: f.m.l, x2: f.m.l + f.iw, y1: by, y2: by, stroke: "#e6ece9", "stroke-width": 1.5, "stroke-dasharray": "6 5", opacity: 0.85 }, svg);
+      el("text", { x: f.m.l + f.iw, y: by - 6, "text-anchor": "end", class: "hl-text", "paint-order": "stroke", stroke: "rgba(26,47,41,0.85)", "stroke-width": 4 }, svg).textContent = `Budget ${money(state.budget)}`;
+    } else {
+      let d = "";
+      pts.forEach(([px, py], i) => { d += `${i ? "L" : "M"}${px.toFixed(1)},${py.toFixed(1)}`; });
+      el("path", { d, fill: "none", stroke: SSP_COLOR, "stroke-width": 2, "stroke-linejoin": "round" }, svg);
+      pts.forEach(([px, py], i) => el("circle", { cx: px, cy: py, r: 4, fill: days[i].date === today ? "#1f3b33" : SSP_COLOR, stroke: SSP_COLOR, "stroke-width": 2 }, svg));
+    }
+    drawHighlight(svg, days, f, pts, SSP_COLOR, (d) => `${state.highlight === "max" ? "Highest" : "Lowest"} ${money(d.v)}, ${shortDate(d.t)}`);
+    finishHover(svg, days, f, pts, W, SSP_COLOR);
+  }
+
+  function drawDailyMix(svg, days, W, H) {
+    const share = state.units === "share";
+    let hi = 100, step = 25;
+    if (!share) {
+      hi = Math.max(...days.map((d) => d.total));
+      step = niceStep(hi, H < 250 ? 4 : 5);
+      hi = Math.ceil(hi / step) * step;
+    }
+    const f = bandFrame(svg, days, W, H, 0, hi, step, (v) => (share ? v + "%" : v >= 1000 ? +(v / 1000).toFixed(1) + " GW" : v + " MW"));
+    const { xc, bw, y } = f, today = todayUK();
+    const pts = [];
+    days.forEach((d, i) => {
+      let base = 0;
+      for (const g of GROUPS) {
+        const v = share ? (d.g[g.id] / d.total) * 100 : d.g[g.id];
+        if (v > 0) el("rect", { x: xc(i) - bw / 2, y: y(base + v), width: bw, height: Math.max(0, y(base) - y(base + v)), fill: g.color, "fill-opacity": d.date === today ? 0.6 : g.id === "gas" ? 0.95 : 0.8 }, svg);
+        base += v;
+        if (g.id === "gas") pts.push([xc(i), y(base)]);
+      }
+    });
+    drawHighlight(svg, days, f, pts, "#f08a24", (d) => `${state.highlight === "max" ? "Most gas" : "Least gas"} ${pct(d.v)}, ${shortDate(d.t)}`);
+    finishHover(svg, days, f, pts, W, "#f08a24");
   }
 
   function drawPrice(svg, s, W, H) {
@@ -957,6 +1057,7 @@ td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
     return Math.abs(p[lo][0] - px) <= Math.abs(p[hi][0] - px) ? lo : hi;
   }
   function tipHtml(d) {
+    if (d.n !== undefined) return tipDaily(d);
     const head = `<div class="t">${shortDate(d.t)}, ${hm(d.t)} (period ${d.period})</div>`;
     if (state.view === "ssp") {
       let extra = "";
@@ -967,6 +1068,19 @@ td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
       .map((g) => `<div class="row${g.id === "gas" ? " gas" : ""}"><i style="background:${g.color}"></i><span class="n">${g.name}</span><span class="x">${pct((d.g[g.id] / d.total) * 100)}</span><span class="m">${mw(d.g[g.id])} MW</span></div>`).join("");
     return `${head}${list}<div class="foot">${mw(d.total)} MW generating${d.exports > 0 ? `, ${mw(d.exports)} MW exporting` : ""}${d.provisional ? "<br>Provisional: wind and solar estimated" : d.full ? "" : "<br>Transmission only, no solar estimate for this period"}</div>`;
   }
+  function tipDaily(d) {
+    const partial = d.date === todayUK() ? `, to ${hm(d.last.t)}` : "";
+    const head = `<div class="t">${shortDate(d.t)}${partial}, ${d.n} periods</div>`;
+    if (state.view === "ssp") {
+      let extra = "";
+      if (state.budget !== null) { const diff = d.v - state.budget; extra = `<div class="${diff >= 0 ? "over" : "under"}">${signedMoney(diff)} vs budget, ${d.above} of ${d.n} periods at or above</div>`; }
+      return `${head}<div class="v">${money(d.v)}/MWh average</div><div class="t">Low ${money(d.min.v)} at ${hm(d.min.t)}, high ${money(d.max.v)} at ${hm(d.max.t)}</div>${extra}`;
+    }
+    const list = [...GROUPS].reverse().filter((g) => d.g[g.id] > 0)
+      .map((g) => `<div class="row${g.id === "gas" ? " gas" : ""}"><i style="background:${g.color}"></i><span class="n">${g.name}</span><span class="x">${pct((d.g[g.id] / d.total) * 100)}</span><span class="m">${mw(d.g[g.id])} MW</span></div>`).join("");
+    return `${head}${list}<div class="foot">Average MW across the day${d.provisional ? "<br>Includes provisional wind and solar" : ""}</div>`;
+  }
+
   function showTip(evt) {
     if (!geom) return;
     const r = $("chart").getBoundingClientRect(), scale = geom.W / r.width;
@@ -1066,6 +1180,7 @@ td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
     }
     panel.classList.remove("open");
     state.range = r;
+    setMode("daily");
     load(false);
   }));
   $("customPanel").addEventListener("submit", (e) => {
@@ -1076,13 +1191,15 @@ td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
     if (f > t) { note.textContent = "The from date needs to be on or before the to date."; return; }
     if (daysBetween(f, t) + 1 > MAX_CUSTOM_DAYS) { note.textContent = `Choose ${MAX_CUSTOM_DAYS} days or fewer.`; return; }
     state.range = "custom"; state.from = f; state.to = t;
+    setMode("daily");
     load(false);
   });
-  document.querySelectorAll("#tableMode button").forEach((b) => b.addEventListener("click", () => {
-    state.tableMode = b.dataset.mode;
-    document.querySelectorAll("#tableMode button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
-    renderTable(rows());
-  }));
+  function setMode(mode) {
+    state.tableMode = mode;
+    state.highlight = null;
+    document.querySelectorAll(".gran button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.mode === mode)));
+  }
+  document.querySelectorAll(".gran button").forEach((b) => b.addEventListener("click", () => { setMode(b.dataset.mode); render(); }));
   document.querySelectorAll("#unitsBox button").forEach((b) => b.addEventListener("click", () => {
     state.units = b.dataset.units;
     document.querySelectorAll("#unitsBox button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
