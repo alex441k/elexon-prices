@@ -156,7 +156,8 @@ main { padding: 22px 24px 40px; max-width: 1480px; margin: 0 auto;
 .empty { padding: 60px 20px; text-align: center; color: var(--faint); }
 
 /* Table */
-.table-head { padding: 14px 18px 10px; }
+.table-head { padding: 12px 18px 10px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+.table-head h2 { margin: 0; font-size: 14px; font-weight: 500; color: var(--muted); letter-spacing: 0.02em; }
 .table-scroll { overflow: auto; max-height: 460px; -webkit-overflow-scrolling: touch; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th {
@@ -238,6 +239,10 @@ footer a { color: var(--muted); }
 .tip .row.gas .n, .tip .row.gas .x { color: var(--gas); }
 .tip .foot { color: var(--faint); margin-top: 6px; }
 td.sel-gas { color: var(--gas); font-weight: 700; }
+td.est { font-style: italic; }
+.prov-tag { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 3px; font-size: 12px; color: var(--text); background: rgba(255,255,255,0.1); border: 1px solid var(--rule-strong); vertical-align: 1px; }
+.prov-note { margin: 12px 0 0; color: var(--faint); font-size: 13px; }
+td .at, td .so-far { color: var(--faint); font-size: 13px; font-weight: 400; }
 [hidden] { display: none !important; }
 @media (max-width: 900px) { .mixkey { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 640px) {
@@ -316,7 +321,13 @@ td.sel-gas { color: var(--gas); font-weight: 700; }
   </section>
 
   <section class="panel">
-    <div class="table-head"><h2 id="tableTitle" style="margin:0;font-size:14px;font-weight:500;color:var(--muted);letter-spacing:0.02em">Settlement data</h2></div>
+    <div class="table-head">
+      <h2 id="tableTitle">Settlement data</h2>
+      <div class="units" id="tableMode" role="group" aria-label="Table rows" hidden>
+        <button type="button" data-mode="periods" aria-pressed="true">Half-hourly</button>
+        <button type="button" data-mode="daily" aria-pressed="false">Daily average</button>
+      </div>
+    </div>
     <div class="table-scroll">
       <table>
         <thead id="thead"></thead>
@@ -364,6 +375,7 @@ td.sel-gas { color: var(--gas); font-weight: 700; }
     wsFailed: false,
     budget: null,
     units: "share",
+    tableMode: "periods",
     highlight: null,
     loadId: 0
   };
@@ -503,9 +515,41 @@ td.sel-gas { color: var(--gas); font-weight: 700; }
       p.v = p.total ? (p.g.gas / p.total) * 100 : 0; // gas share, the headline figure
     }
     out = out.filter((p) => p.total > 0 && p.raw.CCGT !== undefined);
-    // The wind and solar estimate can lag a period behind; stop at the last full period
-    if (out.some((p) => p.full)) while (out.length && !out[out.length - 1].full) out.pop();
+    // Elexon's wind and solar estimate runs about two hours behind the fuel data. For the
+    // periods after the last full one, estimate wind and solar so gas stays current:
+    // wind follows the metered transmission wind, scaled up to the last full period's total,
+    // and solar follows the sun's height from the last full period's figure.
+    let lastFull = null;
+    for (let i = out.length - 1; i >= 0; i--) if (out[i].full) { lastFull = out[i]; break; }
+    if (lastFull) {
+      const windRatio = lastFull.raw.WIND > 0 ? lastFull.g.wind / lastFull.raw.WIND : 1;
+      const sunRef = sunHeight(lastFull.t);
+      for (const p of out) {
+        if (p.t <= lastFull.t) continue;
+        p.provisional = true;
+        p.g.wind = p.raw.WIND > 0 ? p.raw.WIND * windRatio : lastFull.g.wind;
+        const sun = sunHeight(p.t);
+        p.g.solar = sun <= 0 ? 0 : sunRef > 0.05 ? lastFull.g.solar * Math.min(3, sun / sunRef) : lastFull.g.solar;
+        p.total = GROUPS.reduce((a, g) => a + p.g[g.id], 0);
+        p.v = p.total ? (p.g.gas / p.total) * 100 : 0;
+      }
+    }
     return out;
+  }
+
+  // Sine of the sun's elevation over central GB (53.5N, 1.5W), used to shape provisional solar
+  function sunHeight(ms) {
+    const d = new Date(ms);
+    const start = Date.UTC(d.getUTCFullYear(), 0, 0);
+    const n = (ms - start) / 86400000;
+    const rad = Math.PI / 180;
+    const decl = 23.44 * Math.sin(((2 * Math.PI) / 365) * (284 + n)) * rad;
+    const b = ((2 * Math.PI) / 364) * (n - 81);
+    const eot = 9.87 * Math.sin(2 * b) - 7.53 * Math.cos(b) - 1.5 * Math.sin(b);
+    const hours = d.getUTCHours() + d.getUTCMinutes() / 60 + 0.25; // middle of the half hour
+    const hourAngle = (hours + -1.5 / 15 + eot / 60 - 12) * 15 * rad;
+    const lat = 53.5 * rad;
+    return Math.sin(lat) * Math.sin(decl) + Math.cos(lat) * Math.cos(decl) * Math.cos(hourAngle);
   }
 
   async function load(force) {
@@ -557,7 +601,8 @@ td.sel-gas { color: var(--gas); font-weight: 700; }
     $("viewTitle").textContent = heading;
     document.title = `${heading} | Estover`;
     $("chartTitle").textContent = mix ? `Generation by fuel type, ${rangeLabel()}` : `System sell price, ${rangeLabel()}`;
-    $("tableTitle").textContent = `Settlement data, ${s.length} period${s.length === 1 ? "" : "s"}`;
+    const provCount = mix ? s.filter((d) => d.provisional).length : 0;
+    $("tableTitle").textContent = `Settlement data, ${s.length} period${s.length === 1 ? "" : "s"}${provCount ? `. Figures in italics are provisional estimates` : ""}`;
     $("budgetBox").hidden = mix;
     $("unitsBox").hidden = !mix;
     renderStats(s, sum);
@@ -566,7 +611,7 @@ td.sel-gas { color: var(--gas); font-weight: 700; }
     drawChart();
     renderTable(s);
     $("footer").innerHTML = mix
-      ? `${state.wsFailed ? "<strong>Elexon's wind and solar estimate didn't load, so solar and local wind are missing from some periods. Press Refresh to try again.</strong><br>" : ""}Generation from <a href="https://bmrs.elexon.co.uk/generation-by-fuel-type" target="_blank" rel="noopener">Elexon BMRS</a>, averaged over each half hour. Gas, nuclear, biomass, hydro, storage, imports and other fuels are metered transmission-connected output. Wind and solar come from Elexon's <a href="https://bmrs.elexon.co.uk/actual-or-estimated-wind-and-solar-power-generation" target="_blank" rel="noopener">actual or estimated wind and solar</a> data, which adds modelled output from plant on local networks. Small gas, CHP and battery sites on local networks aren't included. Times are UK local and show the start of each settlement period.`
+      ? `${state.wsFailed ? "<strong>Elexon's wind and solar estimate didn't load, so solar and local wind are missing from some periods. Press Refresh to try again.</strong><br>" : ""}Generation from <a href="https://bmrs.elexon.co.uk/generation-by-fuel-type" target="_blank" rel="noopener">Elexon BMRS</a>, averaged over each half hour. Gas, nuclear, biomass, hydro, storage, imports and other fuels are metered transmission-connected output. Wind and solar come from Elexon's <a href="https://bmrs.elexon.co.uk/actual-or-estimated-wind-and-solar-power-generation" target="_blank" rel="noopener">actual or estimated wind and solar</a> data, which adds modelled output from plant on local networks. That estimate runs about two hours behind, so the latest periods use a provisional wind and solar figure, marked on the page, until Elexon publishes. Small gas, CHP and battery sites on local networks aren't included. Times are UK local and show the start of each settlement period.`
       : `Data from the <a href="https://bmrs.elexon.co.uk/system-prices" target="_blank" rel="noopener">Elexon BMRS</a> system prices feed. Times are UK local and show the start of each settlement period.`;
   }
 
@@ -588,7 +633,7 @@ td.sel-gas { color: var(--gas); font-weight: 700; }
     const chHtml = ch === null ? "" : mix
       ? `<div class="delta" style="color:var(--muted)">${ch >= 0 ? "▲" : "▼"} ${Math.abs(ch).toFixed(1)} pts on previous period</div>`
       : `<div class="delta ${ch >= 0 ? "up" : "down"}">${ch >= 0 ? "▲" : "▼"} £${Math.abs(ch).toFixed(2)} on previous period</div>`;
-    const mwLine = (d) => (mix ? `<div class="sub">${mw(d.g.gas)} MW</div>` : "");
+    const mwLine = (d) => (mix ? `<div class="sub">${mw(d.g.gas)} MW${d.provisional ? ", share provisional" : ""}</div>` : "");
     el.innerHTML = `
       <div class="stat"><div class="label">${mix ? "Average gas share" : "Average"}</div><div class="value">${fmt(sum.avg)}</div>${avgExtra}</div>
       ${hlCard("min", mix ? "Least gas" : "Min")}<div class="value">${fmt(sum.min.v)}</div><div class="sub">${when(sum.min)}</div>${mwLine(sum.min)}</div>
@@ -604,8 +649,10 @@ td.sel-gas { color: var(--gas); font-weight: 700; }
     const bar = groups.filter((g) => d.g[g.id] > 0)
       .map((g) => `<span style="width:${(d.g[g.id] / d.total) * 100}%;background:${g.color}" title="${g.name} ${pct((d.g[g.id] / d.total) * 100)}"></span>`).join("");
     const key = groups.map((g) => `<div class="${g.id === "gas" ? "gas" : ""}"><i style="background:${g.color}"></i><span class="n">${g.name}</span><span class="p">${pct((d.g[g.id] / d.total) * 100)}</span><span class="mw">${mw(d.g[g.id])} MW</span></div>`).join("");
-    el.innerHTML = `<div class="now-head"><h2>Latest mix, ${hm(d.t)} ${shortDate(d.t)}</h2><span class="total">${mw(d.total)} MW generating${d.exports > 0 ? `, ${mw(d.exports)} MW exporting` : ""}</span></div>
-      <div class="mixbar" role="img" aria-label="Latest generation mix">${bar}</div><div class="mixkey">${key}</div>`;
+    const note = d.provisional
+      ? `<p class="prov-note">Provisional. Wind and solar are estimated until Elexon publishes its figures for this period, usually about two hours behind. Gas and the other fuels are metered.</p>` : "";
+    el.innerHTML = `<div class="now-head"><h2>Latest mix, ${hm(d.t)} ${shortDate(d.t)}${d.provisional ? ' <span class="prov-tag">Provisional</span>' : ""}</h2><span class="total">${mw(d.total)} MW generating${d.exports > 0 ? `, ${mw(d.exports)} MW exporting` : ""}</span></div>
+      <div class="mixbar" role="img" aria-label="Latest generation mix">${bar}</div><div class="mixkey">${key}</div>${note}`;
     el.hidden = false;
   }
 
@@ -623,7 +670,65 @@ td.sel-gas { color: var(--gas); font-weight: 700; }
     } else el.hidden = true;
   }
 
+  // One row per settlement date. Prices are the plain mean of the periods; gas share is
+  // weighted by output (gas MWh over total MWh), and fuel columns are average MW.
+  function dailyRows(s) {
+    const days = new Map();
+    for (const d of s) {
+      let g = days.get(d.date);
+      if (!g) { g = { date: d.date, t: d.t, list: [] }; days.set(d.date, g); }
+      g.list.push(d);
+    }
+    return [...days.values()].map((g) => {
+      const n = g.list.length;
+      const out = { date: g.date, t: g.t, n, last: g.list[n - 1] };
+      if (state.view === "ssp") {
+        let sum = 0, min = g.list[0], max = g.list[0];
+        for (const d of g.list) { sum += d.v; if (d.v < min.v) min = d; if (d.v > max.v) max = d; }
+        Object.assign(out, { avg: sum / n, min, max,
+          niv: g.list.reduce((a, d) => a + (d.niv ?? 0), 0),
+          above: state.budget === null ? null : g.list.filter((d) => d.v >= state.budget).length });
+      } else {
+        out.g = {};
+        for (const grp of GROUPS) out.g[grp.id] = g.list.reduce((a, d) => a + d.g[grp.id], 0) / n;
+        out.total = g.list.reduce((a, d) => a + d.total, 0) / n;
+        out.share = out.total ? (out.g.gas / out.total) * 100 : 0;
+        out.provisional = g.list.some((d) => d.provisional);
+      }
+      return out;
+    });
+  }
+  const multiDay = (s) => s.length > 0 && s[0].date !== s[s.length - 1].date;
+  const showDaily = (s) => state.tableMode === "daily" && multiDay(s);
+
+  function renderDaily(s) {
+    const mix = state.view === "mix";
+    const days = dailyRows(s).reverse();
+    const today = todayUK();
+    const cols = mix
+      ? ["Date", "Periods", "Gas share", "Gas (MW)", "Wind (MW)", "Solar (MW)", "Nuclear (MW)", "Biomass (MW)", "Imports (MW)", "Hydro (MW)", "Pumped storage (MW)", "Coal, oil, other (MW)", "Total (MW)"]
+      : ["Date", "Periods", "Average SSP (£/MWh)", "Min", "Max", "Net imbalance vol (MWh)", ...(state.budget !== null ? ["At or above budget"] : [])];
+    $("thead").innerHTML = `<tr>${cols.map((c) => `<th>${c}</th>`).join("")}</tr>`;
+    let html = "";
+    for (const d of days) {
+      const soFar = d.date === today ? ` <span class="so-far">to ${hm(d.last.t)}</span>` : "";
+      const lead = `<tr><td class="date">${dual(longDate(d.t), shortDate(d.t))}${soFar}</td><td>${d.n}</td>`;
+      if (mix) {
+        const est = d.provisional ? ' class="est" title="Includes provisional estimates"' : "";
+        html += lead + `<td class="sel-gas${d.provisional ? " est" : ""}">${pct(d.share)}</td><td>${mw(d.g.gas)}</td><td${est}>${mw(d.g.wind)}</td><td${est}>${mw(d.g.solar)}</td><td>${mw(d.g.nuclear)}</td><td>${mw(d.g.biomass)}</td><td>${mw(d.g.imports)}</td><td>${mw(d.g.hydro)}</td><td>${mw(d.g.storage)}</td><td>${mw(d.g.other)}</td><td class="time">${mw(d.total)}</td></tr>`;
+      } else {
+        const b = d.above === null ? "" : `<td class="${d.above * 2 >= d.n ? "over" : "under"}">${d.above} of ${d.n}</td>`;
+        html += lead + `<td class="sel-ssp">${money(d.avg)}</td><td>${money(d.min.v)} <span class="at">at ${hm(d.min.t)}</span></td><td>${money(d.max.v)} <span class="at">at ${hm(d.max.t)}</span></td><td class="${d.niv >= 0 ? "up" : "down"}">${mw(d.niv)}</td>${b}</tr>`;
+      }
+    }
+    $("rows").innerHTML = html;
+    const provDays = mix ? days.filter((d) => d.provisional).length : 0;
+    $("tableTitle").textContent = `Daily averages, ${days.length} days${provDays ? ". Figures in italics include provisional estimates" : ""}`;
+  }
+
   function renderTable(s) {
+    $("tableMode").hidden = !multiDay(s);
+    if (showDaily(s)) return renderDaily(s);
     const mix = state.view === "mix";
     const cols = mix
       ? ["Date", "Time", "Period", "Gas share", "Gas (MW)", "Wind (MW)", "Solar (MW)", "Nuclear (MW)", "Biomass (MW)", "Imports (MW)", "Hydro (MW)", "Pumped storage (MW)", "Coal, oil, other (MW)", "Total (MW)"]
@@ -635,7 +740,8 @@ td.sel-gas { color: var(--gas); font-weight: 700; }
       prevDate = d.date;
       const lead = `<tr${startDay ? ' class="day-start"' : ""}><td class="date">${dual(longDate(d.t), shortDate(d.t))}</td><td class="time">${hm(d.t)}</td><td>${d.period}</td>`;
       if (mix) {
-        html += lead + `<td class="sel-gas">${pct(d.v)}</td><td>${mw(d.g.gas)}</td><td>${mw(d.g.wind)}</td><td>${d.full ? mw(d.g.solar) : "-"}</td><td>${mw(d.g.nuclear)}</td><td>${mw(d.g.biomass)}</td><td>${mw(d.g.imports)}</td><td>${mw(d.g.hydro)}</td><td>${mw(d.g.storage)}</td><td>${mw(d.g.other)}</td><td class="time">${mw(d.total)}</td></tr>`;
+        const est = d.provisional ? ' class="est" title="Provisional estimate"' : "";
+        html += lead + `<td class="sel-gas${d.provisional ? " est" : ""}">${pct(d.v)}</td><td>${mw(d.g.gas)}</td><td${est}>${mw(d.g.wind)}</td><td${est}>${d.full || d.provisional ? mw(d.g.solar) : "-"}</td><td>${mw(d.g.nuclear)}</td><td>${mw(d.g.biomass)}</td><td>${mw(d.g.imports)}</td><td>${mw(d.g.hydro)}</td><td>${mw(d.g.storage)}</td><td>${mw(d.g.other)}</td><td class="time">${mw(d.total)}</td></tr>`;
       } else {
         html += lead + `<td class="sel-ssp">${money(d.v)}</td><td class="${d.niv === null ? "" : d.niv >= 0 ? "up" : "down"}">${d.niv === null ? "-" : Math.round(d.niv)}</td><td class="code">${esc(d.code || "-")}</td></tr>`;
       }
@@ -780,7 +886,7 @@ td.sel-gas { color: var(--gas); font-weight: 700; }
     const { x, y } = f;
     const val = (d, id) => (share ? (d.g[id] / d.total) * 100 : d.g[id]);
     const base = s.map(() => 0);
-    let gasTop = null;
+    let gasTop = null, windBase = null;
     for (const g of GROUPS) {
       const top = s.map((d, i) => base[i] + val(d, g.id));
       if (top.some((v, i) => v > base[i])) {
@@ -790,12 +896,34 @@ td.sel-gas { color: var(--gas); font-weight: 700; }
         el("path", { d: d + "Z", fill: g.color, "fill-opacity": g.id === "gas" ? 0.95 : 0.72, stroke: g.color, "stroke-width": 0.6 }, svg);
       }
       if (g.id === "gas") gasTop = s.map((d, i) => [x(d.t), y(top[i])]);
+      if (g.id === "wind") windBase = base.slice();
       for (let i = 0; i < s.length; i++) base[i] = top[i];
+    }
+    // Clip region covering the wind and solar bands, for the provisional hatching
+    if (windBase) {
+      let cd = "";
+      s.forEach((p, i) => { cd += `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(base[i]).toFixed(1)}`; });
+      for (let i = s.length - 1; i >= 0; i--) cd += `L${x(s[i].t).toFixed(1)},${y(windBase[i]).toFixed(1)}`;
+      el("path", { d: cd + "Z" }, el("clipPath", { id: "windSolarClip" }, el("defs", {}, svg)));
     }
     // Crisp edge along the top of the gas band
     let edge = "";
     gasTop.forEach(([px, py], i) => { edge += `${i ? "L" : "M"}${px.toFixed(1)},${py.toFixed(1)}`; });
     el("path", { d: edge, fill: "none", stroke: "#ffd2a6", "stroke-width": 1.4 }, svg);
+    const firstProv = s.findIndex((d) => d.provisional);
+    if (firstProv >= 0) {
+      const defs = el("defs", {}, svg);
+      const pat = el("pattern", { id: "provHatch", width: 6, height: 6, patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)" }, defs);
+      el("rect", { width: 6, height: 6, fill: "rgba(26,47,41,0.35)" }, pat);
+      el("line", { x1: 0, y1: 0, x2: 0, y2: 6, stroke: "rgba(230,236,233,0.28)", "stroke-width": 2 }, pat);
+      const px = firstProv > 0 ? (x(s[firstProv - 1].t) + x(s[firstProv].t)) / 2 : f.m.l;
+      const top = f.m.t, h = f.ih, w = f.m.l + f.iw - px;
+      // Hatch only the wind and solar bands, which are the estimated part
+      el("rect", { x: px, y: top, width: Math.max(0, w), height: h, fill: "url(#provHatch)", "clip-path": "url(#windSolarClip)" }, svg);
+      el("line", { x1: px, x2: px, y1: top, y2: top + h, stroke: "rgba(230,236,233,0.6)", "stroke-dasharray": "3 3" }, svg);
+      const lbl = el("text", { x: w > 90 ? px + 6 : px - 6, y: top + 13, "text-anchor": w > 90 ? "start" : "end", class: "hl-text", "paint-order": "stroke", stroke: "rgba(26,47,41,0.85)", "stroke-width": 4 }, svg);
+      lbl.textContent = "Provisional";
+    }
     drawHighlight(svg, s, f, gasTop, "#f08a24", (d) => `${state.highlight === "max" ? "Most gas" : "Least gas"} ${pct(d.v)} at ${hm(d.t)}`);
     finishHover(svg, s, f, gasTop, W, "#f08a24");
   }
@@ -837,7 +965,7 @@ td.sel-gas { color: var(--gas); font-weight: 700; }
     }
     const list = [...GROUPS].reverse().filter((g) => d.g[g.id] > 0)
       .map((g) => `<div class="row${g.id === "gas" ? " gas" : ""}"><i style="background:${g.color}"></i><span class="n">${g.name}</span><span class="x">${pct((d.g[g.id] / d.total) * 100)}</span><span class="m">${mw(d.g[g.id])} MW</span></div>`).join("");
-    return `${head}${list}<div class="foot">${mw(d.total)} MW generating${d.exports > 0 ? `, ${mw(d.exports)} MW exporting` : ""}${d.full ? "" : "<br>Transmission only, no solar estimate for this period"}</div>`;
+    return `${head}${list}<div class="foot">${mw(d.total)} MW generating${d.exports > 0 ? `, ${mw(d.exports)} MW exporting` : ""}${d.provisional ? "<br>Provisional: wind and solar estimated" : d.full ? "" : "<br>Transmission only, no solar estimate for this period"}</div>`;
   }
   function showTip(evt) {
     if (!geom) return;
@@ -871,18 +999,28 @@ td.sel-gas { color: var(--gas); font-weight: 700; }
     const s = rows();
     if (!s.length) return;
     const q = (v) => `"${String(v).replace(/"/g, '""')}"`;
-    let head, body;
-    if (state.view === "ssp") {
+    let head, body, daily = false;
+    if (showDaily(s)) {
+      daily = true;
+      const days = dailyRows(s);
+      if (state.view === "ssp") {
+        head = ["Date", "Periods", "Average SSP (£/MWh)", "Min SSP (£/MWh)", "Min time", "Max SSP (£/MWh)", "Max time", "Net imbalance volume (MWh)", ...(state.budget !== null ? [`Periods at or above budget of £${state.budget}`] : [])];
+        body = days.map((d) => [d.date, d.n, d.avg.toFixed(2), d.min.v, hm(d.min.t), d.max.v, hm(d.max.t), Math.round(d.niv), ...(d.above === null ? [] : [d.above])]);
+      } else {
+        head = ["Date", "Periods", "Gas share (%)", ...GROUPS.map((g) => `${g.name} (average MW)`), "Total generating (average MW)", "Includes provisional wind and solar"];
+        body = days.map((d) => [d.date, d.n, d.share.toFixed(2), ...GROUPS.map((g) => Math.round(d.g[g.id])), Math.round(d.total), d.provisional ? "yes" : "no"]);
+      }
+    } else if (state.view === "ssp") {
       head = ["Date", "Time", "Settlement period", "SSP (£/MWh)", "Net imbalance volume (MWh)", "Price derivation code"];
       body = s.map((d) => [d.date, hm(d.t), d.period, d.v, d.niv ?? "", q(d.code)]);
     } else {
       const fuels = [...new Set(s.flatMap((d) => Object.keys(d.raw)))].sort();
-      head = ["Date", "Time", "Settlement period", "Gas share (%)", ...GROUPS.map((g) => `${g.name} (MW)`), "Total generating (MW)", "Exporting (MW)", ...fuels.map((f) => `${f} (MW)`)];
-      body = s.map((d) => [d.date, hm(d.t), d.period, d.v.toFixed(2), ...GROUPS.map((g) => d.g[g.id]), d.total, d.exports, ...fuels.map((f) => d.raw[f] ?? "")]);
+      head = ["Date", "Time", "Settlement period", "Gas share (%)", ...GROUPS.map((g) => `${g.name} (MW)`), "Total generating (MW)", "Exporting (MW)", "Wind and solar provisional", ...fuels.map((f) => `${f} (MW)`)];
+      body = s.map((d) => [d.date, hm(d.t), d.period, d.v.toFixed(2), ...GROUPS.map((g) => d.g[g.id]), Math.round(d.total), d.exports, d.provisional ? "yes" : "no", ...fuels.map((f) => d.raw[f] ?? "")]);
     }
     const csv = [head.map(q).join(","), ...body.map((r) => r.join(","))].join("\r\n");
     const first = s[0].date, last = s[s.length - 1].date;
-    const stem = state.view === "ssp" ? "system-sell-price" : "grid-mix";
+    const stem = (state.view === "ssp" ? "system-sell-price" : "grid-mix") + (daily ? "-daily" : "");
     const name = first === last ? `${stem}-${first}.csv` : `${stem}-${first}-to-${last}.csv`;
     const url = URL.createObjectURL(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }));
     const a = document.createElement("a");
@@ -940,9 +1078,14 @@ td.sel-gas { color: var(--gas); font-weight: 700; }
     state.range = "custom"; state.from = f; state.to = t;
     load(false);
   });
-  document.querySelectorAll(".units button").forEach((b) => b.addEventListener("click", () => {
+  document.querySelectorAll("#tableMode button").forEach((b) => b.addEventListener("click", () => {
+    state.tableMode = b.dataset.mode;
+    document.querySelectorAll("#tableMode button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+    renderTable(rows());
+  }));
+  document.querySelectorAll("#unitsBox button").forEach((b) => b.addEventListener("click", () => {
     state.units = b.dataset.units;
-    document.querySelectorAll(".units button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+    document.querySelectorAll("#unitsBox button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
     drawChart();
   }));
   function pick(b) {
