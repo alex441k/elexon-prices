@@ -1,6 +1,6 @@
 # GB system sell price and grid mix
 
-Estover's half-hourly view of the GB system sell price and the generation mix, live at https://dist-flame-sigma.vercel.app/
+KeelAI's half-hourly view of the GB system sell price and the generation mix, live at https://dist-flame-sigma.vercel.app/
 
 The whole site is one file, `index.html`. There is no build step and nothing to install.
 
@@ -9,6 +9,10 @@ The whole site is one file, `index.html`. There is no build step and nothing to 
 - System sell price by settlement period, with average, min, max and latest, a budget line, and CSV export
 - Grid mix by settlement period, with gas share, the latest mix, a stacked chart by fuel type, and CSV export
 - Today, 7 days, 30 days, month to date or a custom range of up to 93 days
+
+## Branding
+
+KeelAI design system: the navy dark scope, Light Signal Blue as the one accent, Segoe UI with Open Sans as the web fallback, and the KeelAI lockup and app icon. Data colours are kept as they were: fuel types, gas in orange, and green above budget and yellow below.
 
 ## Data sources
 
